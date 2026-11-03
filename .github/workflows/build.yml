@@ -35,7 +35,7 @@ jobs:
           {
             echo '--- Repository files ---'
             ls -lah
-            ZIP='CursedTitans_GitHub_Build_1.21.11.zip'
+            ZIP='Gloomdepths_Build.zip'
             if [[ ! -f "$ZIP" ]]; then
               echo "ERROR: Missing $ZIP in repository root"
               exit 1
@@ -66,8 +66,6 @@ jobs:
             cat "${builds[0]}"
             echo '--- GeckoLib declarations ---'
             grep -n -i 'geckolib' "${builds[0]}" || echo 'NO GECKOLIB IN build.gradle'
-            echo '--- TitanArmorItem imports ---'
-            find "$MOD_DIR/src/main/java" -name TitanArmorItem.java -exec grep '^import ' {} \; || true
             echo '--- Gradle wrapper ---'
             if [[ -f "$MOD_DIR/gradlew" && -f "$MOD_DIR/gradle/wrapper/gradle-wrapper.jar" && -f "$MOD_DIR/gradle/wrapper/gradle-wrapper.properties" ]]; then
               echo 'USE_WRAPPER=true' >> "$GITHUB_ENV"
@@ -146,7 +144,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: CursedTitans3D-JAR
+          name: Gloomdepths-JAR
           path: |
             ${{ env.MOD_DIR }}/build/libs/*.jar
             !${{ env.MOD_DIR }}/build/libs/*-sources.jar
@@ -157,7 +155,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: CursedTitans3D-DIAGNOSTICS-v4
+          name: Gloomdepths-DIAGNOSTICS
           path: |
             source-inspection.log
             dependency-report.log
