@@ -1,0 +1,166 @@
+name: Build Gloomdepths
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle fallback
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.2.1'
+
+      - name: Extract and inspect source
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '--- Repository files ---'
+            ls -lah
+            ZIP='CursedTitans_GitHub_Build_1.21.11.zip'
+            if [[ ! -f "$ZIP" ]]; then
+              echo "ERROR: Missing $ZIP in repository root"
+              exit 1
+            fi
+            unzip -tq "$ZIP"
+            mkdir -p build_src
+            unzip -q "$ZIP" -d build_src
+
+            mapfile -t builds < <(find build_src -maxdepth 6 -type f \( -name build.gradle -o -name build.gradle.kts \) | sort)
+            if [[ ${#builds[@]} -ne 1 ]]; then
+              printf 'ERROR: Expected 1 Gradle project, found %s:\n' "${#builds[@]}"
+              printf '%s\n' "${builds[@]}"
+              exit 1
+            fi
+            MOD_DIR="$(dirname "${builds[0]}")"
+            echo "MOD_DIR=$MOD_DIR" >> "$GITHUB_ENV"
+            echo "Project: $MOD_DIR"
+
+            for file in settings.gradle settings.gradle.kts gradle.properties; do
+              if [[ -f "$MOD_DIR/$file" ]]; then
+                echo "--- $file ---"
+                cat "$MOD_DIR/$file"
+              else
+                echo "--- $file absent ---"
+              fi
+            done
+            echo '--- Original build.gradle ---'
+            cat "${builds[0]}"
+            echo '--- GeckoLib declarations ---'
+            grep -n -i 'geckolib' "${builds[0]}" || echo 'NO GECKOLIB IN build.gradle'
+            echo '--- TitanArmorItem imports ---'
+            find "$MOD_DIR/src/main/java" -name TitanArmorItem.java -exec grep '^import ' {} \; || true
+            echo '--- Gradle wrapper ---'
+            if [[ -f "$MOD_DIR/gradlew" && -f "$MOD_DIR/gradle/wrapper/gradle-wrapper.jar" && -f "$MOD_DIR/gradle/wrapper/gradle-wrapper.properties" ]]; then
+              echo 'USE_WRAPPER=true' >> "$GITHUB_ENV"
+              cat "$MOD_DIR/gradle/wrapper/gradle-wrapper.properties"
+            else
+              echo 'USE_WRAPPER=false' >> "$GITHUB_ENV"
+              echo 'Complete Gradle wrapper absent; use installed Gradle 9.2.1'
+            fi
+          } 2>&1 | tee source-inspection.log
+
+      - name: Resolve dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${USE_WRAPPER:-false}" == 'true' ]]; then
+            chmod +x "$MOD_DIR/gradlew"
+            GRADLE=("$MOD_DIR/gradlew")
+          else
+            GRADLE=(gradle)
+          fi
+          status=0
+          "${GRADLE[@]}" -p "$MOD_DIR" dependencies --configuration compileClasspath \
+            --no-daemon --console=plain --stacktrace 2>&1 | tee dependency-report.log || status=$?
+          echo '--- Failed dependency markers ---'
+          grep -n -C 2 'FAILED' dependency-report.log || true
+          exit "$status"
+
+      - name: Compile mod
+        if: always() && env.MOD_DIR != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${USE_WRAPPER:-false}" == 'true' ]]; then
+            chmod +x "$MOD_DIR/gradlew"
+            GRADLE=("$MOD_DIR/gradlew")
+          else
+            GRADLE=(gradle)
+          fi
+          "${GRADLE[@]}" -p "$MOD_DIR" clean build --no-daemon --console=plain \
+            --stacktrace 2>&1 | tee build.log
+
+      - name: Inspect GeckoLib JARs (cache and project)
+        if: always() && env.MOD_DIR != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' 2>&1 | tee geckolib-check.log
+          import os
+          from pathlib import Path
+          from zipfile import ZipFile, BadZipFile
+
+          roots = [Path.home() / '.gradle/caches/modules-2/files-2.1', Path(os.environ['MOD_DIR'])]
+          jars = sorted({p.resolve() for root in roots if root.exists()
+                         for p in root.rglob('*.jar')
+                         if 'geckolib' in p.name.lower()
+                         and not p.name.lower().endswith(('-sources.jar', '-javadoc.jar'))})
+          if not jars:
+              print('WARNING: No GeckoLib JAR found in Gradle cache or project. See dependency-report.log')
+          found = set()
+          for jar in jars:
+              print('JAR:', jar)
+              try:
+                  with ZipFile(jar) as archive:
+                      for name in sorted(archive.namelist()):
+                          if name.endswith(('/GeoItem.class', '/GeoArmorRenderer.class')):
+                              print('  CLASS:', name)
+                              found.add(name.rsplit('/', 1)[-1])
+              except (OSError, BadZipFile) as exc:
+                  print('  WARNING: Cannot inspect:', exc)
+          for needed in ('GeoItem.class', 'GeoArmorRenderer.class'):
+              if needed not in found:
+                  print('WARNING: Not found:', needed)
+          PY
+
+      - name: Upload compiled mod
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CursedTitans3D-JAR
+          path: |
+            ${{ env.MOD_DIR }}/build/libs/*.jar
+            !${{ env.MOD_DIR }}/build/libs/*-sources.jar
+            !${{ env.MOD_DIR }}/build/libs/*-javadoc.jar
+          if-no-files-found: error
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CursedTitans3D-DIAGNOSTICS-v4
+          path: |
+            source-inspection.log
+            dependency-report.log
+            geckolib-check.log
+            build.log
+          if-no-files-found: ignore
